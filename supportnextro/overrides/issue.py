@@ -200,25 +200,16 @@ def sync_to_ticket_portal(doc):
 # REVERSE SYNC: ticket.nextoraerp.com → source site
 # Only runs when custom_by_ticket = 1
 # ─────────────────────────────────────────────
-def reverse_sync_to_source(doc):
-    source_site = doc.get("custom_site_name")
-
-    if not source_site:
-        frappe.log_error(
-            "No source site found",
-            "Reverse Sync Skipped"
-        )
-        return
-
+def sync_to_ticket_portal(doc):
     try:
-        http = requests.Session()
+        session = requests.Session()
 
         # STEP 1: LOGIN
-        login_res = http.post(
-            f"https://{source_site}/api/method/login",
+        login_res = session.post(
+            "https://ticket.nextoraerp.com/api/method/login",
             data={
-                "usr": "ticket_support",
-                "pwd": "support@zinple"
+                "usr": "ticketuser@gmaill.com",
+                "pwd": "ticketuser@123"
             },
             headers={
                 "Content-Type":
@@ -238,70 +229,64 @@ def reverse_sync_to_source(doc):
                 str(login_data),
                 "Login Failed"
             )
+
+            frappe.db.set_value(
+                "Issue",
+                doc.name,
+                "ticket_sync_status",
+                "Failed"
+            )
+
             return
 
-        # STEP 2: FIND ISSUE
-        custom_issue_id = doc.get("custom_issue_id")
-        local_issue_name = None
+        # STEP 2: VALID EMAIL
+        raised_by = doc.get("raised_by")
 
-        if custom_issue_id:
+        if not raised_by or "@" not in str(raised_by):
 
-            search_res = http.get(
-                f"https://{source_site}/api/resource/Issue/{custom_issue_id}"
+            raised_by = frappe.db.get_value(
+                "User",
+                frappe.session.user,
+                "email"
             )
 
-            issue_data = (
-                search_res.json()
-                .get("data")
-            )
-
-            if issue_data:
-                local_issue_name = (
-                    issue_data.get("name")
-                )
-
-        else:
-
-            search_res = http.get(
-                f"https://{source_site}/api/resource/Issue",
-                params={
-                    "filters":
-                    f'[["ticket_portal_id","=","{doc.name}"]]',
-                    "fields":
-                    '["name"]',
-                    "limit": 1
-                }
-            )
-
-            issues = (
-                search_res.json()
-                .get("data", [])
-            )
-
-            if issues:
-                local_issue_name = (
-                    issues[0]["name"]
-                )
-
-        frappe.log_error(
-            str(local_issue_name),
-            "Local Issue"
-        )
-
-        if not local_issue_name:
-            frappe.log_error(
-                f"No issue found for {doc.name}",
-                "Issue Not Found"
-            )
-            return
-
-        # STEP 3: BUILD PAYLOAD
+        # STEP 3: PAYLOAD
         payload = {
-            "status":
-            doc.get("status"),
+            "subject":
+            doc.get("subject"),
+
+            "raised_by":
+            raised_by,
 
             "description":
             doc.get("description")
+            or "",
+
+            "resolution_details":
+            doc.get(
+                "resolution_details"
+            ),
+
+            "via_customer_portal":
+            doc.get(
+                "via_customer_portal"
+            ),
+
+            "custom_site_name":
+            frappe.local.site,
+
+            "issue_type":
+            doc.get(
+                "issue_type"
+            ),
+
+            "priority":
+            doc.get(
+                "priority"
+            ),
+
+            "custom_issue_id":
+            doc.name
         }
 
         payload = {
@@ -315,27 +300,41 @@ def reverse_sync_to_source(doc):
             "Payload"
         )
 
-        # STEP 4: UPDATE ISSUE
-        update_res = http.put(
-            f"https://{source_site}/api/resource/Issue/{local_issue_name}",
+        # STEP 4: CREATE ISSUE
+        response = session.post(
+            "https://ticket.nextoraerp.com/api/resource/Issue",
             json=payload
         )
 
-        result = update_res.json()
+        result = response.json()
 
         frappe.log_error(
             str(result),
-            "Update Response"
+            "Create Response"
         )
 
         if not result.get("data"):
+
+            frappe.db.set_value(
+                "Issue",
+                doc.name,
+                "ticket_sync_status",
+                "Failed"
+            )
+
             frappe.log_error(
                 str(result),
-                "Update Failed"
+                "Create Failed"
             )
+
             return
 
-        # STEP 5: UPLOAD ATTACHMENTS
+        remote_doc_name = (
+            result["data"]
+            .get("name")
+        )
+
+        # STEP 5: GET ATTACHMENTS
         attachments = frappe.get_all(
             "File",
             filters={
@@ -352,8 +351,14 @@ def reverse_sync_to_source(doc):
             ]
         )
 
-        uploaded_count = 0
+        frappe.log_error(
+            str(attachments),
+            "Attachments"
+        )
 
+        uploaded_files = []
+
+        # STEP 6: UPLOAD FILES
         for att in attachments:
 
             try:
@@ -364,19 +369,21 @@ def reverse_sync_to_source(doc):
                 if not file_url:
                     continue
 
-                # private files
+                # private file
                 if file_url.startswith(
                     "/private"
                 ):
+
                     file_path = (
                         frappe.get_site_path()
                         + file_url
                     )
 
-                # public files
+                # public file
                 elif file_url.startswith(
                     "/files"
                 ):
+
                     file_path = (
                         frappe.get_site_path(
                             "public"
@@ -396,33 +403,35 @@ def reverse_sync_to_source(doc):
                         f.read()
                     )
 
-                upload_res = http.post(
-                    f"https://{source_site}/api/method/upload_file",
-                    data={
-                        "doctype":
-                        "Issue",
+                upload_res = (
+                    session.post(
+                        "https://ticket.nextoraerp.com/api/method/upload_file",
+                        data={
+                            "doctype":
+                            "Issue",
 
-                        "docname":
-                        local_issue_name,
+                            "docname":
+                            remote_doc_name,
 
-                        "fieldname":
-                        "attachment",
+                            "fieldname":
+                            "attachment",
 
-                        "is_private":
-                        att.get(
-                            "is_private",
-                            0
-                        )
-                    },
-                    files={
-                        "file":
-                        (
+                            "is_private":
                             att.get(
-                                "file_name"
-                            ),
-                            file_content
-                        )
-                    }
+                                "is_private",
+                                0
+                            )
+                        },
+                        files={
+                            "file":
+                            (
+                                att.get(
+                                    "file_name"
+                                ),
+                                file_content
+                            )
+                        }
+                    )
                 )
 
                 upload_result = (
@@ -437,7 +446,11 @@ def reverse_sync_to_source(doc):
                 if upload_result.get(
                     "message"
                 ):
-                    uploaded_count += 1
+                    uploaded_files.append(
+                        att.get(
+                            "file_name"
+                        )
+                    )
 
             except Exception as e:
 
@@ -446,34 +459,55 @@ def reverse_sync_to_source(doc):
                     "Attachment Error"
                 )
 
-        # STEP 6: SUCCESS
+        # STEP 7: UPDATE STATUS
+        frappe.db.set_value(
+            "Issue",
+            doc.name,
+            {
+                "ticket_portal_id":
+                remote_doc_name,
+
+                "ticket_sync_status":
+                "Synced"
+            }
+        )
+
+        frappe.db.commit()
+
         frappe.log_error(
-            f"Reverse synced to "
-            f"{source_site} "
-            f"({local_issue_name})",
+            f"Synced to ticket portal "
+            f"({remote_doc_name})",
             "Sync Success"
         )
 
+        # STEP 8: SUCCESS POPUP
         frappe.msgprint(
             f"""
-            Reverse Sync Successful<br><br>
+            Issue synced successfully.<br><br>
+
+            Ticket ID:
+            <b>{remote_doc_name}</b><br>
 
             Site:
-            <b>{source_site}</b><br>
+            <b>{frappe.local.site}</b><br>
 
-            Issue:
-            <b>{local_issue_name}</b><br>
-
-            Attachments Uploaded:
-            <b>{uploaded_count}</b>
+            Attachments uploaded:
+            <b>{len(uploaded_files)}</b>
             """,
-            title="Sync Success",
+            title="Ticket Created",
             indicator="green"
         )
 
     except Exception as e:
 
+        frappe.db.set_value(
+            "Issue",
+            doc.name,
+            "ticket_sync_status",
+            "Failed"
+        )
+
         frappe.log_error(
             str(e),
-            "Reverse Sync Exception"
+            "Ticket Sync Exception"
         )
