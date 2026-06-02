@@ -202,81 +202,68 @@ def sync_to_ticket_portal(doc):
 # ─────────────────────────────────────────────
 def reverse_sync_to_source(doc):
     source_site = doc.get("custom_site_name")
-
     if not source_site:
-        frappe.log_error(
-            "No source site found",
-            "Reverse Sync Skipped"
-        )
+        frappe.log_error("No source site found", "Reverse Sync Skipped")
         return
 
     try:
         http = requests.Session()
 
-        # LOGIN
+        # Step 1: Login to source site
         login_res = http.post(
             f"https://{source_site}/api/method/login",
             data={
                 "usr": "ticket_support",
                 "pwd": "support@zinple"
-            }
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
         )
 
         login_data = login_res.json()
+        frappe.log_error(str(login_data), "Reverse Sync Login Response")
 
         if login_data.get("message") != "Logged In":
-            frappe.log_error(
-                str(login_data),
-                "Reverse Sync Login Failed"
-            )
+            frappe.log_error(str(login_data), "Reverse Sync Login Failed")
             return
 
+        # Step 2: Find issue by custom_issue_id on source site
         custom_issue_id = doc.get("custom_issue_id")
-        local_issue_name = None
 
-        # FIND ISSUE
         if custom_issue_id:
             search_res = http.get(
-                f"https://{source_site}/api/resource/Issue/{custom_issue_id}"
+                f"https://{source_site}/api/resource/Issue/{custom_issue_id}",
             )
-
             issue_data = search_res.json().get("data")
-
-            if issue_data:
-                local_issue_name = issue_data.get("name")
-
+            local_issue_name = issue_data.get("name") if issue_data else None
         else:
             search_res = http.get(
                 f"https://{source_site}/api/resource/Issue",
                 params={
-                    "filters":
-                        f'[["ticket_portal_id","=","{doc.name}"]]',
-                    "fields": '["name"]',
-                    "limit": 1
+                    "filters": f'[["ticket_portal_id","=","{doc.name}"]]',
+                    "fields" : '["name"]',
+                    "limit"  : 1
                 }
             )
-
             issues = search_res.json().get("data", [])
+            local_issue_name = issues[0]["name"] if issues else None
 
-            if issues:
-                local_issue_name = issues[0]["name"]
+        frappe.log_error(str(local_issue_name), "Reverse Sync Local Issue")
 
         if not local_issue_name:
             frappe.log_error(
-                f"No issue found on {source_site}",
+                f"No issue found on {source_site} for ticket {doc.name}",
                 "Reverse Sync Not Found"
             )
             return
 
-        # DESCRIPTION
+        # Step 3: Fetch & upload attachments, append links to description
         description = doc.get("description") or ""
 
-        # FETCH ATTACHMENTS
         attachments = frappe.get_all(
             "File",
             filters={
                 "attached_to_doctype": "Issue",
-                "attached_to_name": doc.name
+                "attached_to_name"   : doc.name
             },
             fields=["file_name", "file_url"]
         )
@@ -287,88 +274,116 @@ def reverse_sync_to_source(doc):
             description += "<br><br><b>Attachments:</b><br>"
 
         for att in attachments:
+            try:
+                file_name, file_base64 = get_file_base64(att.file_url)
 
-            file_name, file_base64 = get_file_base64(
-                att.file_url
-            )
+                if not file_name:
+                    continue
 
-            if not file_name:
+                file_content = base64.b64decode(file_base64)
+
+                remote_url = upload_file_to_portal(
+                    http,
+                    source_site,
+                    file_name,
+                    file_content,
+                    "Issue",
+                    local_issue_name
+                )
+
+                if remote_url:
+                    full_url = f"https://{source_site}{remote_url}"
+                    description += (
+                        f'<a href="{full_url}" target="_blank">'
+                        f'{file_name}</a><br>'
+                    )
+                    uploaded_files.append(file_name)
+
+            except Exception:
+                # Don't abort entire sync if one attachment fails
+                frappe.log_error(
+                    frappe.get_traceback(),
+                    f"Attachment Upload Failed: {att.get('file_name')}"
+                )
                 continue
 
-            file_content = base64.b64decode(
-                file_base64
-            )
-
-            remote_url = upload_file_to_portal(
-                http,
-                file_name,
-                file_content,
-                "Issue",
-                local_issue_name
-            )
-
-            if remote_url:
-                full_url = (
-                    f"https://{source_site}"
-                    f"{remote_url}"
-                )
-
-                description += (
-                    f'<a href="{full_url}" '
-                    f'target="_blank">'
-                    f'{file_name}</a><br>'
-                )
-
-                uploaded_files.append(file_name)
-
-        # UPDATE PAYLOAD
-        payload = {
-            "status": doc.get("status"),
-            "description": description
+        # Step 4: Build payload — only fields with value
+        all_fields = {
+            "status"     : doc.get("status"),
+            "description": description        # use updated description with attachment links
         }
 
         payload = {
-            k: v for k, v in payload.items()
-            if v not in [None, ""]
+            k: v for k, v in all_fields.items()
+            if v is not None and v != ""
         }
 
-        # UPDATE ISSUE
+        frappe.log_error(str(payload), "Reverse Sync Payload")
+
+        # Step 5: Update issue on source site
         update_res = http.put(
-            f"https://{source_site}"
-            f"/api/resource/Issue/"
-            f"{local_issue_name}",
+            f"https://{source_site}/api/resource/Issue/{local_issue_name}",
             json=payload
         )
 
         result = update_res.json()
+        frappe.log_error(str(result), "Reverse Sync Update Response")
 
         if result.get("data"):
-
             frappe.msgprint(
                 f"Issue synced successfully.<br>"
                 f"Site: <b>{source_site}</b><br>"
                 f"Issue: <b>{local_issue_name}</b><br>"
-                f"Attachments: "
-                f"<b>{len(uploaded_files)}</b>",
+                f"Attachments uploaded: <b>{len(uploaded_files)}</b>",
                 title="Reverse Sync Success",
                 indicator="green"
             )
-
             frappe.log_error(
-                f"Reverse synced → "
-                f"{source_site} : "
-                f"{local_issue_name}",
+                f"Reverse synced → {source_site} : {local_issue_name}",
                 "Reverse Sync Success"
             )
-
         else:
+            frappe.log_error(str(result), "Reverse Sync Failed")
+
+    except Exception:
+        frappe.log_error(frappe.get_traceback(), "Reverse Sync Exception")
+
+
+def upload_file_to_portal(http, source_site, file_name, file_content, doctype, docname):
+    """
+    Upload a file to the remote Frappe site using the same authenticated session.
+    Returns the file_url string on success, or None on failure.
+    """
+    try:
+        response = http.post(
+            f"https://{source_site}/api/method/upload_file",
+            data={
+                "cmd"     : "upload_file",  # required by some Frappe versions
+                "doctype" : doctype,
+                "docname" : docname,
+                "is_private": 0
+            },
+            files={
+                "file": (file_name, file_content)  # multipart upload
+            }
+        )
+
+        # Explicit permission check
+        if response.status_code == 403:
             frappe.log_error(
-                str(result),
-                "Reverse Sync Failed"
+                str(response.json()),
+                "Upload Permission Denied — grant File Write access to ticket_support"
             )
+            return None
+
+        result = response.json()
+        frappe.log_error(str(result), f"Upload Response: {file_name}")
+
+        return result.get("message", {}).get("file_url")
 
     except Exception:
         frappe.log_error(
             frappe.get_traceback(),
-            "Reverse Sync Exception"
+            f"upload_file_to_portal Exception: {file_name}"
         )
+        return None
