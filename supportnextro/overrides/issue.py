@@ -261,13 +261,8 @@ def reverse_sync_to_source(doc):
 
         # Step 3: Build payload — only fields with value
         all_fields = {
-            "subject"            : doc.get("subject"),
             "status"             : doc.get("status"),
             "description"        : doc.get("description"),
-            "resolution_details" : doc.get("resolution_details"),
-            "customer_name"      : doc.get("customer_name"),
-            "via_customer_portal": doc.get("via_customer_portal"),
-            "content_type"       : doc.get("content_type"),
         }
 
         payload = {k: v for k, v in all_fields.items() if v is not None and v != ""}
