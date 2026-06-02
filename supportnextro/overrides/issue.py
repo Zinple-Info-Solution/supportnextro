@@ -7,28 +7,18 @@ def after_insert(doc, method):
     pass
 
 def on_update(doc, method):
-    if doc.get("ticket_sync_status") == "Synced":
-        return
-
     if getattr(doc, "_syncing", False):
         return
 
     doc._syncing = True
 
-    # Check if this is a ticket coming FROM ticket.nextoraerp.com
-    # If custom_by_ticket = 1, do reverse sync back to source site
+    # If custom_by_ticket = 1 and custom_site_name exists
+    # this doc is on ticket.nextoraerp.com — sync back to source site
     if doc.get("custom_by_ticket") == 1 and doc.get("custom_site_name"):
         reverse_sync_to_source(doc)
     else:
-        # Normal forward sync to ticket portal
+        # Normal forward sync — your site → ticket.nextoraerp.com
         sync_to_ticket_portal(doc)
-
-def set_sync_status(doc_name, values):
-    try:
-        frappe.db.set_value("Issue", doc_name, values)
-        frappe.db.commit()
-    except Exception:
-        frappe.log_error(frappe.get_traceback(), "set_sync_status failed")
 
 def get_valid_email(raised_by):
     if raised_by and "@" in raised_by:
@@ -117,7 +107,6 @@ def sync_to_ticket_portal(doc):
         )
 
         if login_res.json().get("message") != "Logged In":
-            set_sync_status(doc.name, {"ticket_sync_status": "Failed"})
             frappe.log_error("Login failed", "Ticket Sync")
             return
 
@@ -132,7 +121,7 @@ def sync_to_ticket_portal(doc):
         )
 
         frappe.log_error(
-            f"Found {len(attachments)} attachments for {doc.name}: {attachments}",
+            f"Found {len(attachments)} attachments for {doc.name}",
             "Attachment Debug"
         )
 
@@ -161,11 +150,11 @@ def sync_to_ticket_portal(doc):
         result = response.json()
 
         if not result.get("data"):
-            set_sync_status(doc.name, {"ticket_sync_status": "Failed"})
             frappe.log_error(str(result), "Ticket Sync Failed")
             return
 
         remote_doc_name = result["data"].get("name")
+        frappe.log_error(f"Remote issue created: {remote_doc_name}", "Ticket Sync")
 
         # Step 5: Upload attachments
         uploaded_files = []
@@ -178,10 +167,6 @@ def sync_to_ticket_portal(doc):
                 )
                 if remote_url:
                     uploaded_files.append(file_name)
-                    frappe.log_error(
-                        f"Uploaded {file_name} → {remote_url}",
-                        "Attachment Upload Success"
-                    )
 
         # Step 6: Fix inline images in description
         updated_description = fix_description_links(
@@ -195,28 +180,25 @@ def sync_to_ticket_portal(doc):
                 json={"description": updated_description}
             )
 
-        # Step 8: Save ticket ID back to local issue
-        set_sync_status(doc.name, {
-            "ticket_portal_id"  : remote_doc_name,
-            "ticket_sync_status": "Synced"
-        })
+        # Step 8: Save remote ticket ID back to local issue
+        frappe.db.set_value("Issue", doc.name, "ticket_portal_id", remote_doc_name)
+        frappe.db.commit()
 
         frappe.msgprint(
-            f"""Issue synced successfully.<br>
-            Ticket ID           : <b>{remote_doc_name}</b><br>
-            Site                : <b>{frappe.local.site}</b><br>
-            Attachments uploaded: <b>{len(uploaded_files)}</b>""",
+            f"Issue synced successfully.<br>"
+            f"Ticket ID: <b>{remote_doc_name}</b><br>"
+            f"Site: <b>{frappe.local.site}</b><br>"
+            f"Attachments: <b>{len(uploaded_files)}</b>",
             title="Ticket Created",
             indicator="green"
         )
 
     except Exception:
-        set_sync_status(doc.name, {"ticket_sync_status": "Failed"})
         frappe.log_error(frappe.get_traceback(), "Ticket Sync Exception")
 
 # ─────────────────────────────────────────────
 # REVERSE SYNC: ticket.nextoraerp.com → source site
-# Triggered when custom_by_ticket = 1
+# Only runs when custom_by_ticket = 1
 # ─────────────────────────────────────────────
 def reverse_sync_to_source(doc):
     source_site = doc.get("custom_site_name")
@@ -244,27 +226,38 @@ def reverse_sync_to_source(doc):
             frappe.log_error(str(login_data), "Reverse Sync Login Failed")
             return
 
-        # Step 2: Find issue by ticket_portal_id on source site
-        search_res = http.get(
-            f"https://{source_site}/api/resource/Issue",
-            params={
-                "filters": f'[["ticket_portal_id","=","{doc.name}"]]',
-                "fields" : '["name"]',
-                "limit"  : 1
-            }
-        )
+        # Step 2: Find issue by custom_issue_id on source site
+        # custom_issue_id was set when forward syncing
+        custom_issue_id = doc.get("custom_issue_id")
 
-        issues = search_res.json().get("data", [])
-        frappe.log_error(str(issues), "Reverse Sync Search Result")
+        if custom_issue_id:
+            # Direct lookup by issue name
+            search_res = http.get(
+                f"https://{source_site}/api/resource/Issue/{custom_issue_id}",
+            )
+            issue_data = search_res.json().get("data")
+            local_issue_name = issue_data.get("name") if issue_data else None
+        else:
+            # Fallback: search by ticket_portal_id
+            search_res = http.get(
+                f"https://{source_site}/api/resource/Issue",
+                params={
+                    "filters": f'[["ticket_portal_id","=","{doc.name}"]]',
+                    "fields" : '["name"]',
+                    "limit"  : 1
+                }
+            )
+            issues = search_res.json().get("data", [])
+            local_issue_name = issues[0]["name"] if issues else None
 
-        if not issues:
+        frappe.log_error(str(local_issue_name), "Reverse Sync Local Issue")
+
+        if not local_issue_name:
             frappe.log_error(
                 f"No issue found on {source_site} for ticket {doc.name}",
                 "Reverse Sync Not Found"
             )
             return
-
-        local_issue_name = issues[0]["name"]
 
         # Step 3: Build payload — only fields with value
         all_fields = {
@@ -275,7 +268,6 @@ def reverse_sync_to_source(doc):
             "customer_name"      : doc.get("customer_name"),
             "via_customer_portal": doc.get("via_customer_portal"),
             "content_type"       : doc.get("content_type"),
-            "ticket_sync_status" : "Synced",
         }
 
         payload = {k: v for k, v in all_fields.items() if v is not None and v != ""}
