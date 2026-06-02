@@ -27,7 +27,9 @@ app_license = "mit"
 # include js, css files in header of desk.html
 # app_include_css = "/assets/supportnextro/css/supportnextro.css"
 # app_include_js = "/assets/supportnextro/js/supportnextro.js"
-
+app_include_js = [
+    "/assets/supportnextro/js/workspace_footer.js"
+]
 # include js, css files in header of web template
 # web_include_css = "/assets/supportnextro/css/supportnextro.css"
 # web_include_js = "/assets/supportnextro/js/supportnextro.js"
@@ -136,7 +138,11 @@ app_license = "mit"
 # Document Events
 # ---------------
 # Hook on document methods and events
-
+doc_events = {
+    "Issue": {
+        "on_update": "supportnextro.overrides.issue.on_update"
+    }
+}
 # doc_events = {
 # 	"*": {
 # 		"on_update": "method",
