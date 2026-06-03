@@ -623,6 +623,13 @@ def reverse_sync_to_source(doc):
             "reverse_sync_api_secret"
         )
 
+        if not api_key or not api_secret:
+            safe_log(
+                "Reverse Sync",
+                "API credentials missing"
+            )
+            return
+
         headers = {
             "Authorization":
             f"token {api_key}:{api_secret}"
@@ -634,17 +641,110 @@ def reverse_sync_to_source(doc):
         )
 
         if not issue_name:
+            safe_log(
+                "Reverse Sync",
+                "Issue name missing"
+            )
             return
 
+        session = requests.Session()
+        session.headers.update(headers)
+
+        # ------------------------------------------------
+        # STEP 1: Upload attachments to source site
+        # ------------------------------------------------
+
+        attachments = frappe.get_all(
+            "File",
+            filters={
+                "attached_to_doctype": "Issue",
+                "attached_to_name": doc.name
+            },
+            fields=[
+                "file_name",
+                "file_url",
+                "is_private"
+            ]
+        )
+
+        uploaded_files_map = {}
+
+        for att in attachments:
+
+            file_name, file_base64 = get_file_base64(
+                att.file_url
+            )
+
+            if not file_name or not file_base64:
+                continue
+
+            try:
+                file_content = base64.b64decode(
+                    file_base64
+                )
+
+                response = session.post(
+                    f"https://{source_site}/api/method/upload_file",
+                    data={
+                        "doctype": "Issue",
+                        "docname": issue_name,
+                        "fieldname": "attachment",
+                        "is_private": 0
+                    },
+                    files={
+                        "file": (
+                            file_name,
+                            file_content
+                        )
+                    }
+                )
+
+                result = response.json()
+
+                if result.get("message"):
+                    uploaded_url = result[
+                        "message"
+                    ].get("file_url")
+
+                    uploaded_files_map[
+                        att.file_url
+                    ] = uploaded_url
+
+            except Exception:
+                safe_log(
+                    "Reverse File Upload",
+                    frappe.get_traceback()
+                )
+
+        # ------------------------------------------------
+        # STEP 2: Fix inline file URLs in description
+        # ------------------------------------------------
+
+        description = (
+            doc.get("description") or ""
+        )
+
+        for old_url, new_url in (
+            uploaded_files_map.items()
+        ):
+            description = description.replace(
+                old_url,
+                f"https://{source_site}{new_url}"
+            )
+
+        # ------------------------------------------------
+        # STEP 3: Update source issue
+        # ------------------------------------------------
+
         payload = {
-            "status": doc.status,
-            "description": doc.description
+            "status": doc.get("status"),
+            "description": description
         }
 
-        res = requests.put(
+        res = session.put(
             f"https://{source_site}/api/resource/Issue/{issue_name}",
-            headers=headers,
-            json=payload
+            json=payload,
+            timeout=20
         )
 
         safe_log(
@@ -657,10 +757,3 @@ def reverse_sync_to_source(doc):
             "Reverse Sync Exception",
             frappe.get_traceback()
         )
-
-
-
-
-
-
-
