@@ -207,46 +207,44 @@ def reverse_sync_to_source(doc):
         return
 
     try:
-        http = requests.Session()
+        # Use API key/secret instead of session login
+        # Store these in Frappe's "Website Settings" or a custom doctype / environment
+        api_key = frappe.conf.get("reverse_sync_api_key")
+        api_secret = frappe.conf.get("reverse_sync_api_secret")
 
-        # Step 1: Login to source site
-        login_res = http.post(
-            f"https://{source_site}/api/method/login",
-            data={
-                "usr": "ticket_support",
-                "pwd": "support@zinple"
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"}
-        )
-
-        login_data = login_res.json()
-        frappe.log_error(str(login_data), "Reverse Sync Login Response")
-
-        if login_data.get("message") != "Logged In":
-            frappe.log_error(str(login_data), "Reverse Sync Login Failed")
+        if not api_key or not api_secret:
+            frappe.log_error("API credentials not configured", "Reverse Sync Skipped")
             return
 
-        # Step 2: Find issue by custom_issue_id on source site
-        # custom_issue_id was set when forward syncing
+        headers = {
+            "Authorization": f"token {api_key}:{api_secret}",
+            "Content-Type": "application/json"
+        }
+
+        base_url = f"https://{source_site}"
+
+        # Step 1: Find issue by custom_issue_id on source site
         custom_issue_id = doc.get("custom_issue_id")
 
         if custom_issue_id:
-            # Direct lookup by issue name
-            search_res = http.get(
-                f"https://{source_site}/api/resource/Issue/{custom_issue_id}",
+            search_res = requests.get(
+                f"{base_url}/api/resource/Issue/{custom_issue_id}",
+                headers=headers
             )
+            search_res.raise_for_status()
             issue_data = search_res.json().get("data")
             local_issue_name = issue_data.get("name") if issue_data else None
         else:
-            # Fallback: search by ticket_portal_id
-            search_res = http.get(
-                f"https://{source_site}/api/resource/Issue",
+            search_res = requests.get(
+                f"{base_url}/api/resource/Issue",
+                headers=headers,
                 params={
                     "filters": f'[["ticket_portal_id","=","{doc.name}"]]',
-                    "fields" : '["name"]',
-                    "limit"  : 1
+                    "fields": '["name"]',
+                    "limit": 1
                 }
             )
+            search_res.raise_for_status()
             issues = search_res.json().get("data", [])
             local_issue_name = issues[0]["name"] if issues else None
 
@@ -259,20 +257,23 @@ def reverse_sync_to_source(doc):
             )
             return
 
-        # Step 3: Build payload — only fields with value
-        all_fields = {
-            "status"             : doc.get("status"),
-            "description"        : doc.get("description"),
+        # Step 2: Build payload
+        payload = {
+            k: v for k, v in {
+                "status": doc.get("status"),
+                "description": doc.get("description"),
+            }.items() if v is not None and v != ""
         }
 
-        payload = {k: v for k, v in all_fields.items() if v is not None and v != ""}
         frappe.log_error(str(payload), "Reverse Sync Payload")
 
-        # Step 4: Update issue on source site
-        update_res = http.put(
-            f"https://{source_site}/api/resource/Issue/{local_issue_name}",
+        # Step 3: Update issue on source site
+        update_res = requests.put(
+            f"{base_url}/api/resource/Issue/{local_issue_name}",
+            headers=headers,
             json=payload
         )
+        update_res.raise_for_status()
 
         result = update_res.json()
         frappe.log_error(str(result), "Reverse Sync Update Response")
