@@ -623,11 +623,227 @@ def safe_log(title, message):
         pass
 
 
+# def reverse_sync_to_source(doc):
+
+#     try:
+#         # ---------------------------------------
+#         # Prevent loop sync
+#         # ---------------------------------------
+#         if doc.get("custom_is_syncing"):
+#             frappe.db.set_value(
+#                 "Issue",
+#                 doc.name,
+#                 "custom_is_syncing",
+#                 0
+#             )
+#             frappe.db.commit()
+#             return
+
+#         source_site = doc.get("custom_site_name")
+#         custom_issue_id = doc.get("custom_issue_id")
+
+#         if not source_site:
+#             safe_log(
+#                 "Reverse Sync",
+#                 "Source site missing"
+#             )
+#             return
+
+#         if not custom_issue_id:
+#             safe_log(
+#                 "Reverse Sync",
+#                 "Issue ID missing"
+#             )
+#             return
+
+#         # ---------------------------------------
+#         # Sync only changed fields
+#         # ---------------------------------------
+#         changed = (
+#             doc.has_value_changed("status")
+#             or doc.has_value_changed("description")
+#         )
+
+#         if not changed:
+#             return
+
+#         # ---------------------------------------
+#         # Login
+#         # ---------------------------------------
+#         session = requests.Session()
+
+#         login_res = session.post(
+#             f"https://{source_site}/api/method/login",
+#             data={
+#                 "usr": "ticket_support",
+#                 "pwd": "support@zinple"
+#             },
+#             headers={
+#                 "Content-Type":
+#                 "application/x-www-form-urlencoded"
+#             },
+#             timeout=120
+#         )
+
+#         login_json = login_res.json()
+
+#         if login_json.get("message") != "Logged In":
+
+#             safe_log(
+#                 "Reverse Login Failed",
+#                 login_json
+#             )
+#             return
+
+#         # ---------------------------------------
+#         # Upload attachments
+#         # ---------------------------------------
+#         attachments = frappe.get_all(
+#             "File",
+#             filters={
+#                 "attached_to_doctype": "Issue",
+#                 "attached_to_name": doc.name
+#             },
+#             fields=[
+#                 "file_name",
+#                 "file_url",
+#                 "is_private"
+#             ]
+#         )
+
+#         uploaded_files_map = {}
+
+#         for att in attachments:
+
+#             try:
+#                 file_name, file_base64 = get_file_base64(
+#                     att.file_url
+#                 )
+
+#                 if not file_name or not file_base64:
+#                     continue
+
+#                 file_content = base64.b64decode(
+#                     file_base64
+#                 )
+
+#                 upload_res = session.post(
+#                     f"https://{source_site}/api/method/upload_file",
+#                     data={
+#                         "doctype": "Issue",
+#                         "docname": custom_issue_id,
+#                         "fieldname": "attachment",
+#                         "is_private": 0
+#                     },
+#                     files={
+#                         "file": (
+#                             file_name,
+#                             file_content
+#                         )
+#                     },
+#                     timeout=300
+#                 )
+
+#                 try:
+#                     result = upload_res.json()
+#                 except Exception:
+#                     result = {}
+
+#                 if result.get("message"):
+
+#                     uploaded_url = result[
+#                         "message"
+#                     ].get("file_url")
+
+#                     if uploaded_url:
+#                         uploaded_files_map[
+#                             att.file_url
+#                         ] = uploaded_url
+
+#             except Exception:
+#                 safe_log(
+#                     "Reverse File Upload",
+#                     frappe.get_traceback()
+#                 )
+
+#         # ---------------------------------------
+#         # Fix description image URLs
+#         # ---------------------------------------
+#         description = doc.description or ""
+
+#         for old_url, new_url in uploaded_files_map.items():
+
+#             description = description.replace(
+#                 old_url,
+#                 f"https://{source_site}{new_url}"
+#             )
+
+#         # convert private ticket URLs
+#         description = description.replace(
+#             "https://ticket.nextoraerp.com/private/files/",
+#             f"https://{source_site}/files/"
+#         )
+
+#         # ---------------------------------------
+#         # Payload
+#         # ---------------------------------------
+#         payload = {
+#             "custom_is_syncing": 1
+#         }
+
+#         if doc.has_value_changed("status"):
+#             payload["status"] = doc.status
+
+#         if doc.has_value_changed("description"):
+#             payload["description"] = description
+
+#         safe_log(
+#             "Reverse Payload",
+#             payload
+#         )
+
+#         # ---------------------------------------
+#         # Update issue
+#         # ---------------------------------------
+#         update_res = session.put(
+#             f"https://{source_site}/api/resource/Issue/{custom_issue_id}",
+#             json=payload,
+#             timeout=300
+#         )
+
+#         try:
+#             result = update_res.json()
+#         except Exception:
+#             result = {
+#                 "response": update_res.text[:1000]
+#             }
+
+#         if not result.get("data"):
+
+#             safe_log(
+#                 "Reverse Sync Failed",
+#                 result
+#             )
+
+#         else:
+#             safe_log(
+#                 "Reverse Sync Success",
+#                 f"{custom_issue_id} synced"
+#             )
+
+#     except Exception:
+#         safe_log(
+#             "Reverse Sync Exception",
+#             frappe.get_traceback()
+#         )
+
+
 def reverse_sync_to_source(doc):
 
     try:
+
         # ---------------------------------------
-        # Prevent loop sync
+        # prevent sync loop
         # ---------------------------------------
         if doc.get("custom_is_syncing"):
             frappe.db.set_value(
@@ -639,36 +855,30 @@ def reverse_sync_to_source(doc):
             frappe.db.commit()
             return
 
-        source_site = doc.get("custom_site_name")
-        custom_issue_id = doc.get("custom_issue_id")
-
-        if not source_site:
-            safe_log(
-                "Reverse Sync",
-                "Source site missing"
-            )
-            return
-
-        if not custom_issue_id:
-            safe_log(
-                "Reverse Sync",
-                "Issue ID missing"
-            )
-            return
-
-        # ---------------------------------------
-        # Sync only changed fields
-        # ---------------------------------------
-        changed = (
-            doc.has_value_changed("status")
-            or doc.has_value_changed("description")
+        source_site = doc.get(
+            "custom_site_name"
         )
 
-        if not changed:
+        custom_issue_id = doc.get(
+            "custom_issue_id"
+        )
+
+        if not source_site or not custom_issue_id:
+            return
+
+        status_changed = doc.has_value_changed(
+            "status"
+        )
+
+        desc_changed = doc.has_value_changed(
+            "description"
+        )
+
+        if not status_changed and not desc_changed:
             return
 
         # ---------------------------------------
-        # Login
+        # login
         # ---------------------------------------
         session = requests.Session()
 
@@ -677,10 +887,6 @@ def reverse_sync_to_source(doc):
             data={
                 "usr": "ticket_support",
                 "pwd": "support@zinple"
-            },
-            headers={
-                "Content-Type":
-                "application/x-www-form-urlencoded"
             },
             timeout=120
         )
@@ -695,115 +901,134 @@ def reverse_sync_to_source(doc):
             )
             return
 
-        # ---------------------------------------
-        # Upload attachments
-        # ---------------------------------------
-        attachments = frappe.get_all(
-            "File",
-            filters={
-                "attached_to_doctype": "Issue",
-                "attached_to_name": doc.name
-            },
-            fields=[
-                "file_name",
-                "file_url",
-                "is_private"
-            ]
-        )
-
-        uploaded_files_map = {}
-
-        for att in attachments:
-
-            try:
-                file_name, file_base64 = get_file_base64(
-                    att.file_url
-                )
-
-                if not file_name or not file_base64:
-                    continue
-
-                file_content = base64.b64decode(
-                    file_base64
-                )
-
-                upload_res = session.post(
-                    f"https://{source_site}/api/method/upload_file",
-                    data={
-                        "doctype": "Issue",
-                        "docname": custom_issue_id,
-                        "fieldname": "attachment",
-                        "is_private": 0
-                    },
-                    files={
-                        "file": (
-                            file_name,
-                            file_content
-                        )
-                    },
-                    timeout=300
-                )
-
-                try:
-                    result = upload_res.json()
-                except Exception:
-                    result = {}
-
-                if result.get("message"):
-
-                    uploaded_url = result[
-                        "message"
-                    ].get("file_url")
-
-                    if uploaded_url:
-                        uploaded_files_map[
-                            att.file_url
-                        ] = uploaded_url
-
-            except Exception:
-                safe_log(
-                    "Reverse File Upload",
-                    frappe.get_traceback()
-                )
-
-        # ---------------------------------------
-        # Fix description image URLs
-        # ---------------------------------------
-        description = doc.description or ""
-
-        for old_url, new_url in uploaded_files_map.items():
-
-            description = description.replace(
-                old_url,
-                f"https://{source_site}{new_url}"
-            )
-
-        # convert private ticket URLs
-        description = description.replace(
-            "https://ticket.nextoraerp.com/private/files/",
-            f"https://{source_site}/files/"
-        )
-
-        # ---------------------------------------
-        # Payload
-        # ---------------------------------------
         payload = {
             "custom_is_syncing": 1
         }
 
-        if doc.has_value_changed("status"):
+        # ---------------------------------------
+        # sync status only
+        # ---------------------------------------
+        if status_changed:
             payload["status"] = doc.status
 
-        if doc.has_value_changed("description"):
-            payload["description"] = description
+        # ---------------------------------------
+        # sync description + images only if changed
+        # ---------------------------------------
+        if desc_changed:
 
-        safe_log(
-            "Reverse Payload",
-            payload
-        )
+            description = (
+                doc.description or ""
+            )
+
+            attachments = frappe.get_all(
+                "File",
+                filters={
+                    "attached_to_doctype":
+                    "Issue",
+
+                    "attached_to_name":
+                    doc.name
+                },
+                fields=[
+                    "file_name",
+                    "file_url"
+                ]
+            )
+
+            uploaded_files_map = {}
+
+            for att in attachments:
+
+                try:
+
+                    file_name, file_base64 = (
+                        get_file_base64(
+                            att.file_url
+                        )
+                    )
+
+                    if (
+                        not file_name
+                        or not file_base64
+                    ):
+                        continue
+
+                    file_content = (
+                        base64.b64decode(
+                            file_base64
+                        )
+                    )
+
+                    upload_res = session.post(
+                        f"https://{source_site}/api/method/upload_file",
+                        data={
+                            "doctype":
+                            "Issue",
+
+                            "docname":
+                            custom_issue_id,
+
+                            "fieldname":
+                            "attachment",
+
+                            "is_private": 0
+                        },
+                        files={
+                            "file": (
+                                file_name,
+                                file_content
+                            )
+                        },
+                        timeout=300
+                    )
+
+                    try:
+                        result = (
+                            upload_res.json()
+                        )
+                    except Exception:
+                        result = {}
+
+                    if result.get(
+                        "message"
+                    ):
+
+                        uploaded_url = (
+                            result["message"]
+                            .get("file_url")
+                        )
+
+                        if uploaded_url:
+
+                            uploaded_files_map[
+                                att.file_url
+                            ] = uploaded_url
+
+                except Exception:
+                    safe_log(
+                        "Reverse File Upload",
+                        frappe.get_traceback()
+                    )
+
+            # replace image urls
+            for (
+                old_url,
+                new_url
+            ) in uploaded_files_map.items():
+
+                description = (
+                    description.replace(
+                        old_url,
+                        f"https://{source_site}{new_url}"
+                    )
+                )
+
+            payload[
+                "description"
+            ] = description
 
         # ---------------------------------------
-        # Update issue
+        # update issue
         # ---------------------------------------
         update_res = session.put(
             f"https://{source_site}/api/resource/Issue/{custom_issue_id}",
@@ -812,23 +1037,28 @@ def reverse_sync_to_source(doc):
         )
 
         try:
-            result = update_res.json()
+            result = (
+                update_res.json()
+            )
         except Exception:
             result = {
-                "response": update_res.text[:1000]
+                "response":
+                update_res.text[:1000]
             }
 
-        if not result.get("data"):
+        if result.get("data"):
 
             safe_log(
-                "Reverse Sync Failed",
-                result
+                "Reverse Sync Success",
+                f"Reverse synced → "
+                f"{source_site} : "
+                f"{custom_issue_id}"
             )
 
         else:
             safe_log(
-                "Reverse Sync Success",
-                f"{custom_issue_id} synced"
+                "Reverse Sync Failed",
+                result
             )
 
     except Exception:
