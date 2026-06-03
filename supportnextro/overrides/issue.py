@@ -200,90 +200,70 @@ def sync_to_ticket_portal(doc):
 # REVERSE SYNC: ticket.nextoraerp.com → source site
 # Only runs when custom_by_ticket = 1
 # ─────────────────────────────────────────────
+
 def reverse_sync_to_source(doc):
+    """
+    Sync status/description changes from ticket site → source site.
+    """
+
+    # ── Skip if this save was triggered by a sync from source site ──
+    if doc.get("custom_is_syncing"):
+        frappe.db.set_value("Issue", doc.name, "custom_is_syncing", 0)
+        return
+
+    # ── Only run for tickets that were forward-synced ──
     source_site = doc.get("custom_site_name")
-    if not source_site:
-        frappe.log_error("No source site found", "Reverse Sync Skipped")
+    custom_issue_id = doc.get("custom_issue_id")
+
+    if not source_site or not custom_issue_id:
+        return
+
+    # ── Only sync if relevant fields actually changed ──
+    if not (doc.has_value_changed("status") or doc.has_value_changed("description")):
         return
 
     try:
         http = requests.Session()
 
-        # Step 1: Login to source site
+        # Step 1: Login
         login_res = http.post(
             f"https://{source_site}/api/method/login",
-            data={
-                "usr": "ticket_support",
-                "pwd": "support@zinple"
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"}
+            data={"usr": "ticket_support", "pwd": "support@zinple"},
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=10
         )
 
-        login_data = login_res.json()
-        frappe.log_error(str(login_data), "Reverse Sync Login Response")
-
-        if login_data.get("message") != "Logged In":
-            frappe.log_error(str(login_data), "Reverse Sync Login Failed")
-            return
-
-        # Step 2: Find issue by custom_issue_id on source site
-        # custom_issue_id was set when forward syncing
-        custom_issue_id = doc.get("custom_issue_id")
-
-        if custom_issue_id:
-            # Direct lookup by issue name
-            search_res = http.get(
-                f"https://{source_site}/api/resource/Issue/{custom_issue_id}",
-            )
-            issue_data = search_res.json().get("data")
-            local_issue_name = issue_data.get("name") if issue_data else None
-        else:
-            # Fallback: search by ticket_portal_id
-            search_res = http.get(
-                f"https://{source_site}/api/resource/Issue",
-                params={
-                    "filters": f'[["ticket_portal_id","=","{doc.name}"]]',
-                    "fields" : '["name"]',
-                    "limit"  : 1
-                }
-            )
-            issues = search_res.json().get("data", [])
-            local_issue_name = issues[0]["name"] if issues else None
-
-        frappe.log_error(str(local_issue_name), "Reverse Sync Local Issue")
-
-        if not local_issue_name:
+        if login_res.json().get("message") != "Logged In":
             frappe.log_error(
-                f"No issue found on {source_site} for ticket {doc.name}",
-                "Reverse Sync Not Found"
+                f"Login failed: {source_site}",
+                "Reverse Sync Login Failed"
             )
             return
 
-        # Step 3: Build payload — only fields with value
-        all_fields = {
-            "status"             : doc.get("status"),
-            "description"        : doc.get("description"),
-        }
+        # Step 2: Build payload
+        payload = {}
+        if doc.has_value_changed("status"):
+            payload["status"] = doc.status
+        if doc.has_value_changed("description"):
+            payload["description"] = doc.description
 
-        payload = {k: v for k, v in all_fields.items() if v is not None and v != ""}
-        frappe.log_error(str(payload), "Reverse Sync Payload")
+        # ✅ Tell source site: skip your sync hooks for this update
+        payload["custom_is_syncing"] = 1
 
-        # Step 4: Update issue on source site
+        # Step 3: Update issue on source site
         update_res = http.put(
-            f"https://{source_site}/api/resource/Issue/{local_issue_name}",
-            json=payload
+            f"https://{source_site}/api/resource/Issue/{custom_issue_id}",
+            json=payload,
+            timeout=10
         )
 
         result = update_res.json()
-        frappe.log_error(str(result), "Reverse Sync Update Response")
 
-        if result.get("data"):
+        if not result.get("data"):
             frappe.log_error(
-                f"Reverse synced → {source_site} : {local_issue_name}",
-                "Reverse Sync Success"
+                f"Update failed for {custom_issue_id}: {str(result)[:120]}",
+                "Reverse Sync Failed"
             )
-        else:
-            frappe.log_error(str(result), "Reverse Sync Failed")
 
     except Exception:
         frappe.log_error(frappe.get_traceback(), "Reverse Sync Exception")
