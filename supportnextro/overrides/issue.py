@@ -299,17 +299,17 @@ import base64
 import re
 
 
-def safe_log(title, message):
-    """
-    Safe log for large payloads / files
-    """
-    try:
-        frappe.log_error(
-            str(message)[:5000],   # message
-            str(title)[:140]       # title
-        )
-    except Exception:
-        pass
+# def safe_log(title, message):
+#     """
+#     Safe log for large payloads / files
+#     """
+#     try:
+#         frappe.log_error(
+#             str(message)[:5000],   # message
+#             str(title)[:140]       # title
+#         )
+#     except Exception:
+#         pass
 
 def after_insert(doc, method):
     pass
@@ -524,61 +524,310 @@ def sync_to_ticket_portal(doc):
 # Only runs when custom_by_ticket = 1
 # ─────────────────────────────────────────────
 
+# def reverse_sync_to_source(doc):
+#     """
+#     Sync status/description changes from ticket site → source site.
+#     """
+
+#     # ── Skip if this save was triggered by a sync from source site ──
+#     if doc.get("custom_is_syncing"):
+#         frappe.db.set_value("Issue", doc.name, "custom_is_syncing", 0)
+#         return
+
+#     # ── Only run for tickets that were forward-synced ──
+#     source_site = doc.get("custom_site_name")
+#     custom_issue_id = doc.get("custom_issue_id")
+
+#     if not source_site or not custom_issue_id:
+#         return
+
+#     # ── Only sync if relevant fields actually changed ──
+#     if not (doc.has_value_changed("status") or doc.has_value_changed("description")):
+#         return
+
+#     try:
+#         http = requests.Session()
+
+#         # Step 1: Login
+#         login_res = http.post(
+#             f"https://{source_site}/api/method/login",
+#             data={"usr": "ticket_support", "pwd": "support@zinple"},
+#             headers={"Content-Type": "application/x-www-form-urlencoded"},
+#             timeout=120
+#         )
+
+#         if login_res.json().get("message") != "Logged In":
+#             # frappe.log_error(
+#             #     f"Login failed: {source_site}",
+#             #     "Reverse Sync Login Failed"
+#             # )
+#             safe_log(
+#     "Reverse Sync Login Failed",
+#     f"Login failed: {source_site}"
+# )
+#             return
+
+#         # Step 2: Build payload
+#         payload = {}
+#         if doc.has_value_changed("status"):
+#             payload["status"] = doc.status
+#         if doc.has_value_changed("description"):
+#             payload["description"] = doc.description
+
+#         # ✅ Tell source site: skip your sync hooks for this update
+#         payload["custom_is_syncing"] = 1
+
+#         # Step 3: Update issue on source site
+#         update_res = http.put(
+#             f"https://{source_site}/api/resource/Issue/{custom_issue_id}",
+#             json=payload,
+#             timeout=120
+#         )
+
+#         result = update_res.json()
+
+#         if not result.get("data"):
+#             # frappe.log_error(
+#             #     f"Update failed for {custom_issue_id}: {str(result)[:120]}",
+#             #     "Reverse Sync Failed"
+#             # )
+#             safe_log(
+#     "Reverse Sync Failed",
+#     result
+# )
+
+#     except Exception:
+#         # frappe.log_error(frappe.get_traceback(), "Reverse Sync Exception")
+#         safe_log(
+#     "Ticket Sync Exception",
+#     frappe.get_traceback()
+# )
+
+
+
+def safe_log(title, message):
+    try:
+        frappe.log_error(
+            str(message)[:5000],
+            str(title)[:140]
+        )
+    except Exception:
+        pass
+
+
 def reverse_sync_to_source(doc):
-    """
-    Sync status/description changes from ticket site → source site.
-    """
-
-    # ── Skip if this save was triggered by a sync from source site ──
-    if doc.get("custom_is_syncing"):
-        frappe.db.set_value("Issue", doc.name, "custom_is_syncing", 0)
-        return
-
-    # ── Only run for tickets that were forward-synced ──
-    source_site = doc.get("custom_site_name")
-    custom_issue_id = doc.get("custom_issue_id")
-
-    if not source_site or not custom_issue_id:
-        return
-
-    # ── Only sync if relevant fields actually changed ──
-    if not (doc.has_value_changed("status") or doc.has_value_changed("description")):
-        return
 
     try:
-        http = requests.Session()
 
-        # Step 1: Login
-        login_res = http.post(
+        # ---------------------------------------
+        # Prevent loop sync
+        # ---------------------------------------
+        if doc.get("custom_is_syncing"):
+            frappe.db.set_value(
+                "Issue",
+                doc.name,
+                "custom_is_syncing",
+                0
+            )
+            return
+
+        source_site = doc.get(
+            "custom_site_name"
+        )
+
+        custom_issue_id = doc.get(
+            "custom_issue_id"
+        )
+
+        if not source_site:
+            safe_log(
+                "Reverse Sync",
+                "Source site missing"
+            )
+            return
+
+        if not custom_issue_id:
+            safe_log(
+                "Reverse Sync",
+                "Issue ID missing"
+            )
+            return
+
+        # ---------------------------------------
+        # Login
+        # ---------------------------------------
+        session = requests.Session()
+
+        login_res = session.post(
             f"https://{source_site}/api/method/login",
-            data={"usr": "ticket_support", "pwd": "support@zinple"},
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "usr": "ticket_support",
+                "pwd": "support@zinple"
+            },
+            headers={
+                "Content-Type":
+                "application/x-www-form-urlencoded"
+            },
             timeout=120
         )
 
-        if login_res.json().get("message") != "Logged In":
-            # frappe.log_error(
-            #     f"Login failed: {source_site}",
-            #     "Reverse Sync Login Failed"
-            # )
+        login_json = login_res.json()
+
+        safe_log(
+            "Reverse Sync Login Response",
+            login_json
+        )
+
+        if login_json.get(
+            "message"
+        ) != "Logged In":
+
             safe_log(
-    "Reverse Sync Login Failed",
-    f"Login failed: {source_site}"
-)
+                "Reverse Sync Login Failed",
+                login_json
+            )
             return
 
-        # Step 2: Build payload
-        payload = {}
-        if doc.has_value_changed("status"):
-            payload["status"] = doc.status
-        if doc.has_value_changed("description"):
-            payload["description"] = doc.description
+        # ---------------------------------------
+        # Upload images/files
+        # ---------------------------------------
+        attachments = frappe.get_all(
+            "File",
+            filters={
+                "attached_to_doctype":
+                "Issue",
 
-        # ✅ Tell source site: skip your sync hooks for this update
-        payload["custom_is_syncing"] = 1
+                "attached_to_name":
+                doc.name
+            },
+            fields=[
+                "file_name",
+                "file_url",
+                "is_private"
+            ]
+        )
 
-        # Step 3: Update issue on source site
-        update_res = http.put(
+        uploaded_files_map = {}
+
+        for att in attachments:
+
+            try:
+
+                file_name, file_base64 = (
+                    get_file_base64(
+                        att.file_url
+                    )
+                )
+
+                if (
+                    not file_name
+                    or not file_base64
+                ):
+                    continue
+
+                file_content = (
+                    base64.b64decode(
+                        file_base64
+                    )
+                )
+
+                upload_res = session.post(
+                    f"https://{source_site}/api/method/upload_file",
+                    data={
+                        "doctype":
+                        "Issue",
+
+                        "docname":
+                        custom_issue_id,
+
+                        "fieldname":
+                        "attachment",
+
+                        # IMPORTANT
+                        "is_private": 0
+                    },
+                    files={
+                        "file": (
+                            file_name,
+                            file_content
+                        )
+                    },
+                    timeout=120
+                )
+
+                result = (
+                    upload_res.json()
+                )
+
+                if result.get(
+                    "message"
+                ):
+
+                    uploaded_url = (
+                        result["message"]
+                        .get("file_url")
+                    )
+
+                    if uploaded_url:
+
+                        uploaded_files_map[
+                            att.file_url
+                        ] = uploaded_url
+
+            except Exception:
+                safe_log(
+                    "Reverse File Upload",
+                    frappe.get_traceback()
+                )
+
+        # ---------------------------------------
+        # Fix description image URLs
+        # ---------------------------------------
+        description = (
+            doc.description or ""
+        )
+
+        for (
+            old_url,
+            new_url
+        ) in uploaded_files_map.items():
+
+            description = (
+                description.replace(
+                    old_url,
+                    f"https://{source_site}{new_url}"
+                )
+            )
+
+        # replace private URL → public URL
+        description = description.replace(
+            "https://ticket.nextoraerp.com/private/files/",
+            f"https://{source_site}/files/"
+        )
+
+        # ---------------------------------------
+        # Payload
+        # ---------------------------------------
+        payload = {
+            "status":
+            doc.status,
+
+            "description":
+            description,
+
+            "custom_is_syncing":
+            1
+        }
+
+        safe_log(
+            "Reverse Sync Payload",
+            payload
+        )
+
+        # ---------------------------------------
+        # Update source issue
+        # ---------------------------------------
+        update_res = session.put(
             f"https://{source_site}/api/resource/Issue/{custom_issue_id}",
             json=payload,
             timeout=120
@@ -586,19 +835,21 @@ def reverse_sync_to_source(doc):
 
         result = update_res.json()
 
-        if not result.get("data"):
-            # frappe.log_error(
-            #     f"Update failed for {custom_issue_id}: {str(result)[:120]}",
-            #     "Reverse Sync Failed"
-            # )
+        safe_log(
+            "Reverse Sync Response",
+            result
+        )
+
+        if not result.get(
+            "data"
+        ):
             safe_log(
-    "Reverse Sync Failed",
-    result
-)
+                "Reverse Sync Failed",
+                result
+            )
 
     except Exception:
-        # frappe.log_error(frappe.get_traceback(), "Reverse Sync Exception")
         safe_log(
-    "Ticket Sync Exception",
-    frappe.get_traceback()
-)
+            "Reverse Sync Exception",
+            frappe.get_traceback()
+        )
