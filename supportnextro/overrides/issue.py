@@ -469,8 +469,10 @@ def sync_to_ticket_portal(doc):
             return
 
         remote_doc_name = result["data"].get("name")
-        frappe.log_error(f"Remote issue created: {remote_doc_name}", "Ticket Sync")
-
+        safe_log(
+    "Ticket Sync",
+    f"Remote issue created: {remote_doc_name}"
+)
         # Step 5: Upload attachments
         uploaded_files = []
         for att in attachments:
@@ -516,8 +518,14 @@ def sync_to_ticket_portal(doc):
     """
 )
 
+    # except Exception:
+        # frappe.log_error(frappe.get_traceback(), "Ticket Sync Exception")
+
     except Exception:
-        frappe.log_error(frappe.get_traceback(), "Ticket Sync Exception")
+        safe_log(
+            "Ticket Sync Exception",
+            frappe.get_traceback()
+        )
 
 # ─────────────────────────────────────────────
 # REVERSE SYNC: ticket.nextoraerp.com → source site
@@ -618,7 +626,6 @@ def safe_log(title, message):
 def reverse_sync_to_source(doc):
 
     try:
-
         # ---------------------------------------
         # Prevent loop sync
         # ---------------------------------------
@@ -629,15 +636,11 @@ def reverse_sync_to_source(doc):
                 "custom_is_syncing",
                 0
             )
+            frappe.db.commit()
             return
 
-        source_site = doc.get(
-            "custom_site_name"
-        )
-
-        custom_issue_id = doc.get(
-            "custom_issue_id"
-        )
+        source_site = doc.get("custom_site_name")
+        custom_issue_id = doc.get("custom_issue_id")
 
         if not source_site:
             safe_log(
@@ -651,6 +654,17 @@ def reverse_sync_to_source(doc):
                 "Reverse Sync",
                 "Issue ID missing"
             )
+            return
+
+        # ---------------------------------------
+        # Sync only changed fields
+        # ---------------------------------------
+        changed = (
+            doc.has_value_changed("status")
+            or doc.has_value_changed("description")
+        )
+
+        if not changed:
             return
 
         # ---------------------------------------
@@ -673,32 +687,22 @@ def reverse_sync_to_source(doc):
 
         login_json = login_res.json()
 
-        safe_log(
-            "Reverse Sync Login Response",
-            login_json
-        )
-
-        if login_json.get(
-            "message"
-        ) != "Logged In":
+        if login_json.get("message") != "Logged In":
 
             safe_log(
-                "Reverse Sync Login Failed",
+                "Reverse Login Failed",
                 login_json
             )
             return
 
         # ---------------------------------------
-        # Upload images/files
+        # Upload attachments
         # ---------------------------------------
         attachments = frappe.get_all(
             "File",
             filters={
-                "attached_to_doctype":
-                "Issue",
-
-                "attached_to_name":
-                doc.name
+                "attached_to_doctype": "Issue",
+                "attached_to_name": doc.name
             },
             fields=[
                 "file_name",
@@ -712,38 +716,23 @@ def reverse_sync_to_source(doc):
         for att in attachments:
 
             try:
-
-                file_name, file_base64 = (
-                    get_file_base64(
-                        att.file_url
-                    )
+                file_name, file_base64 = get_file_base64(
+                    att.file_url
                 )
 
-                if (
-                    not file_name
-                    or not file_base64
-                ):
+                if not file_name or not file_base64:
                     continue
 
-                file_content = (
-                    base64.b64decode(
-                        file_base64
-                    )
+                file_content = base64.b64decode(
+                    file_base64
                 )
 
                 upload_res = session.post(
                     f"https://{source_site}/api/method/upload_file",
                     data={
-                        "doctype":
-                        "Issue",
-
-                        "docname":
-                        custom_issue_id,
-
-                        "fieldname":
-                        "attachment",
-
-                        # IMPORTANT
+                        "doctype": "Issue",
+                        "docname": custom_issue_id,
+                        "fieldname": "attachment",
                         "is_private": 0
                     },
                     files={
@@ -752,24 +741,21 @@ def reverse_sync_to_source(doc):
                             file_content
                         )
                     },
-                    timeout=120
+                    timeout=300
                 )
 
-                result = (
-                    upload_res.json()
-                )
+                try:
+                    result = upload_res.json()
+                except Exception:
+                    result = {}
 
-                if result.get(
-                    "message"
-                ):
+                if result.get("message"):
 
-                    uploaded_url = (
-                        result["message"]
-                        .get("file_url")
-                    )
+                    uploaded_url = result[
+                        "message"
+                    ].get("file_url")
 
                     if uploaded_url:
-
                         uploaded_files_map[
                             att.file_url
                         ] = uploaded_url
@@ -783,23 +769,16 @@ def reverse_sync_to_source(doc):
         # ---------------------------------------
         # Fix description image URLs
         # ---------------------------------------
-        description = (
-            doc.description or ""
-        )
+        description = doc.description or ""
 
-        for (
-            old_url,
-            new_url
-        ) in uploaded_files_map.items():
+        for old_url, new_url in uploaded_files_map.items():
 
-            description = (
-                description.replace(
-                    old_url,
-                    f"https://{source_site}{new_url}"
-                )
+            description = description.replace(
+                old_url,
+                f"https://{source_site}{new_url}"
             )
 
-        # replace private URL → public URL
+        # convert private ticket URLs
         description = description.replace(
             "https://ticket.nextoraerp.com/private/files/",
             f"https://{source_site}/files/"
@@ -809,43 +788,47 @@ def reverse_sync_to_source(doc):
         # Payload
         # ---------------------------------------
         payload = {
-            "status":
-            doc.status,
-
-            "description":
-            description,
-
-            "custom_is_syncing":
-            1
+            "custom_is_syncing": 1
         }
 
+        if doc.has_value_changed("status"):
+            payload["status"] = doc.status
+
+        if doc.has_value_changed("description"):
+            payload["description"] = description
+
         safe_log(
-            "Reverse Sync Payload",
+            "Reverse Payload",
             payload
         )
 
         # ---------------------------------------
-        # Update source issue
+        # Update issue
         # ---------------------------------------
         update_res = session.put(
             f"https://{source_site}/api/resource/Issue/{custom_issue_id}",
             json=payload,
-            timeout=120
+            timeout=300
         )
 
-        result = update_res.json()
+        try:
+            result = update_res.json()
+        except Exception:
+            result = {
+                "response": update_res.text[:1000]
+            }
 
-        safe_log(
-            "Reverse Sync Response",
-            result
-        )
+        if not result.get("data"):
 
-        if not result.get(
-            "data"
-        ):
             safe_log(
                 "Reverse Sync Failed",
                 result
+            )
+
+        else:
+            safe_log(
+                "Reverse Sync Success",
+                f"{custom_issue_id} synced"
             )
 
     except Exception:
