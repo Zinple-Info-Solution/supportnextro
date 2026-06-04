@@ -690,7 +690,7 @@ def reverse_sync_to_source(doc):
         if login_json.get("message") != "Logged In":
             safe_log(
                 "Reverse Login Failed",
-                login_json
+                str(login_json)
             )
             return
 
@@ -757,19 +757,14 @@ def reverse_sync_to_source(doc):
                     result = {}
 
                 if result.get("message"):
-
-                    uploaded_url = result[
-                        "message"
-                    ].get("file_url")
+                    uploaded_url = result["message"].get("file_url")
 
                     if uploaded_url:
-                        uploaded_files_map[
-                            att.file_url
-                        ] = uploaded_url
+                        uploaded_files_map[att.file_url] = uploaded_url
 
             except Exception:
                 safe_log(
-                    "Reverse File Upload",
+                    "Reverse File Upload Error",
                     frappe.get_traceback()
                 )
 
@@ -779,13 +774,12 @@ def reverse_sync_to_source(doc):
         description = doc.description or ""
 
         for old_url, new_url in uploaded_files_map.items():
-
             description = description.replace(
                 old_url,
                 f"https://{source_site}{new_url}"
             )
 
-        # convert private ticket URLs
+        # Convert private ticket URLs
         description = description.replace(
             "https://ticket.nextoraerp.com/private/files/",
             f"https://{source_site}/files/"
@@ -804,13 +798,8 @@ def reverse_sync_to_source(doc):
         if doc.has_value_changed("description"):
             payload["description"] = description
 
-        safe_log(
-            "Reverse Payload",
-            payload
-        )
-
         # ---------------------------------------
-        # Update issue
+        # Update issue on source site
         # ---------------------------------------
         update_res = session.put(
             f"https://{source_site}/api/resource/Issue/{custom_issue_id}",
@@ -831,13 +820,12 @@ def reverse_sync_to_source(doc):
         if not result.get("data"):
             safe_log(
                 "Reverse Sync Failed",
-                result
+                str(result)[:5000]
             )
-
         else:
             safe_log(
                 "Reverse Sync Success",
-                f"{custom_issue_id} synced"
+                f"{custom_issue_id} synced successfully"
             )
 
     except Exception:
