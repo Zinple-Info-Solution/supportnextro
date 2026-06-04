@@ -688,12 +688,16 @@ def reverse_sync_to_source(doc):
         login_json = login_res.json()
 
         if login_json.get("message") != "Logged In":
-
             safe_log(
                 "Reverse Login Failed",
                 login_json
             )
             return
+
+        # ---------------------------------------
+        # Get CSRF token after login
+        # ---------------------------------------
+        csrf_token = session.cookies.get("csrf_token", "")
 
         # ---------------------------------------
         # Upload attachments
@@ -740,6 +744,9 @@ def reverse_sync_to_source(doc):
                             file_name,
                             file_content
                         )
+                    },
+                    headers={
+                        "X-Frappe-CSRF-Token": csrf_token
                     },
                     timeout=300
                 )
@@ -808,6 +815,9 @@ def reverse_sync_to_source(doc):
         update_res = session.put(
             f"https://{source_site}/api/resource/Issue/{custom_issue_id}",
             json=payload,
+            headers={
+                "X-Frappe-CSRF-Token": csrf_token
+            },
             timeout=300
         )
 
@@ -819,7 +829,6 @@ def reverse_sync_to_source(doc):
             }
 
         if not result.get("data"):
-
             safe_log(
                 "Reverse Sync Failed",
                 result
