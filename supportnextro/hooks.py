@@ -140,7 +140,8 @@ app_include_js = [
 # Hook on document methods and events
 doc_events = {
     "Issue": {
-        "on_update": "supportnextro.overrides.issue.on_update"
+        "after_insert": "supportnextro.overrides.issue.after_insert",
+        "on_update"   : "supportnextro.overrides.issue.on_update",
     }
 }
 # doc_events = {
